@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FPV Dashboard</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.4.1/socket.io.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>FPV Dashboard</h1>
+        </header>
+        
+        <div class="data-grid">
+            <div class="card">
+                <h3>Roll</h3>
+                <div class="data-value" id="roll">0.0°</div>
+            </div>
+            <div class="card">
+                <h3>Pitch</h3>
+                <div class="data-value" id="pitch">0.0°</div>
+            </div>
+            <div class="card">
+                <h3>Yaw</h3>
+                <div class="data-value" id="yaw">0.0°</div>
+            </div>
+            <div class="card">
+                <h3>Altitude</h3>
+                <div class="data-value" id="altitude">0.0 m</div>
+            </div>
+        </div>
+        
+        <div class="chart-container">
+            <h3>Attitude Data</h3>
+            <canvas id="attitudeChart"></canvas>
+        </div>
+        
+        <div class="chart-container">
+            <h3>IMU Data</h3>
+            <canvas id="imuChart"></canvas>
+        </div>
+    </div>
+
+    <script src="js/dashboard.js"></script>
+</body>
+</html>
