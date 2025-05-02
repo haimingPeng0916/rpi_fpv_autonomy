@@ -4,9 +4,7 @@ import json
 import time
 import serial
 import struct
-from picamera2 import Picamera2
-from picamera2.encoders import JpegEncoder
-from picamera2.outputs import FileOutput
+import cv2
 from threading import Thread
 import socket
 import os
@@ -232,10 +230,16 @@ class MJPEGStreamServer:
         self.camera = None
         
     def start(self):
-        # Initialize camera
-        self.camera = Picamera2()
-        self.camera.configure(self.camera.create_video_configuration(main={"size": (640, 480)}))
-        self.camera.start()
+        # Initialize OpenCV camera
+        self.camera = cv2.VideoCapture(0)  # Use 0 for the first camera
+        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        
+        if not self.camera.isOpened():
+            logger.error("Failed to open camera")
+            return False
+            
+        logger.info("Camera initialized successfully")
         
         # Start the server in a separate thread
         server_thread = Thread(target=self._run_server)
@@ -243,6 +247,7 @@ class MJPEGStreamServer:
         server_thread.start()
         
         logger.info(f"MJPEG stream server started on port {self.port}")
+        return True
         
     def _run_server(self):
         try:
@@ -276,7 +281,7 @@ class MJPEGStreamServer:
             # Send HTTP response header
             response = (
                 b'HTTP/1.0 200 OK\r\n'
-                b'Server: PiCamera MJPEG Server\r\n'
+                b'Server: OpenCV MJPEG Server\r\n'
                 b'Content-Type: multipart/x-mixed-replace; boundary=FRAME\r\n'
                 b'Cache-Control: no-cache\r\n'
                 b'Connection: close\r\n\r\n'
@@ -284,20 +289,29 @@ class MJPEGStreamServer:
             conn.sendall(response)
             
             # Stream frames
-            while not stop_event:
+            while not stop_event and self.camera.isOpened():
                 # Capture a frame from the camera
-                frame = self.camera.capture_array()
+                ret, frame = self.camera.read()
+                if not ret:
+                    logger.warning("Failed to read frame from camera")
+                    break
                 
                 # Convert to JPEG
-                jpeg_buffer = self.camera.capture_buffer("main", format="jpeg")
+                ret, jpeg_buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                if not ret:
+                    logger.warning("Failed to encode frame to JPEG")
+                    continue
+                
+                # Get the byte array
+                jpeg_bytes = jpeg_buffer.tobytes()
                 
                 # Send the frame with MJPEG header
                 conn.sendall(
                     b'--FRAME\r\n'
                     b'Content-Type: image/jpeg\r\n'
-                    b'Content-Length: ' + str(len(jpeg_buffer)).encode() + b'\r\n\r\n'
+                    b'Content-Length: ' + str(len(jpeg_bytes)).encode() + b'\r\n\r\n'
                 )
-                conn.sendall(jpeg_buffer)
+                conn.sendall(jpeg_bytes)
                 conn.sendall(b'\r\n')
                 
                 # Limit frame rate
@@ -326,9 +340,9 @@ class MJPEGStreamServer:
             except:
                 pass
                 
-        # Stop camera
-        if self.camera:
-            self.camera.stop()
+        # Release camera
+        if self.camera and self.camera.isOpened():
+            self.camera.release()
             
         logger.info("MJPEG stream server shut down")
 
@@ -340,39 +354,41 @@ async def websocket_server(stop):
         
         try:
             while not stop.is_set():
-                # Wait for messages from clients
-                message = await asyncio.wait_for(websocket.recv(), timeout=1.0)
-                
-                # Parse the command
                 try:
-                    data = json.loads(message)
+                    # Wait for messages from clients with a timeout
+                    message = await asyncio.wait_for(websocket.recv(), timeout=1.0)
                     
-                    if data.get('type') == 'command':
-                        command = data.get('command', '')
-                        logger.info(f"Received command: {command}")
+                    # Parse the command
+                    try:
+                        data = json.loads(message)
                         
-                        # Process the command and get response
-                        if fc_serial and msp:
-                            response = msp.send_command(command)
-                        else:
-                            response = "Flight controller not connected"
+                        if data.get('type') == 'command':
+                            command = data.get('command', '')
+                            logger.info(f"Received command: {command}")
                             
-                        # Send response back to client
-                        await websocket.send(json.dumps({
-                            "type": "command_response",
-                            "message": response
-                        }))
+                            # Process the command and get response
+                            if fc_serial and msp:
+                                response = msp.send_command(command)
+                            else:
+                                response = "Flight controller not connected"
+                                
+                            # Send response back to client
+                            await websocket.send(json.dumps({
+                                "type": "command_response",
+                                "message": response
+                            }))
+                            
+                    except json.JSONDecodeError:
+                        logger.error(f"Invalid JSON: {message}")
+                    except Exception as e:
+                        logger.error(f"Error processing command: {e}")
                         
-                except json.JSONDecodeError:
-                    logger.error(f"Invalid JSON: {message}")
-                except Exception as e:
-                    logger.error(f"Error processing command: {e}")
-                    
-        except asyncio.TimeoutError:
-            # This is fine - it's just our timeout to check stop flag
-            pass
-        except websockets.exceptions.ConnectionClosed:
-            logger.info("Client disconnected")
+                except asyncio.TimeoutError:
+                    # This is fine - it's just our timeout to check stop flag
+                    pass
+                except websockets.exceptions.ConnectionClosed:
+                    logger.info("Client disconnected")
+                    break
         finally:
             # Unregister client
             connected_clients.remove(websocket)
@@ -399,20 +415,12 @@ async def sensor_data_broadcast(stop):
                 pass
             else:
                 # Simulate data for testing
-                sensor_data.roll += 0.1
-                if sensor_data.roll > 45:
-                    sensor_data.roll = -45
-                    
-                sensor_data.pitch += 0.2
-                if sensor_data.pitch > 30:
-                    sensor_data.pitch = -30
-                    
-                sensor_data.yaw += 0.5
-                if sensor_data.yaw > 360:
-                    sensor_data.yaw = 0
-                    
-                sensor_data.altitude = 10 + 2 * Math.sin(time.time() / 5)
-                sensor_data.battery = 70 - time.time() % 30
+                import math
+                sensor_data.roll = 45 * math.sin(time.time() * 0.5)
+                sensor_data.pitch = 30 * math.sin(time.time() * 0.3)
+                sensor_data.yaw = (time.time() * 10) % 360
+                sensor_data.altitude = 10 + 2 * math.sin(time.time() / 5)
+                sensor_data.battery = 70 - (time.time() % 30)
             
             # Broadcast sensor data to all connected clients
             if connected_clients:
@@ -437,7 +445,10 @@ def cleanup(signal_received=None, frame=None):
     stop_event = True
     
     # Stop the asyncio event loop
-    asyncio.get_event_loop().stop()
+    try:
+        asyncio.get_event_loop().stop()
+    except:
+        pass
     
     # Close serial connection
     if fc_serial:
@@ -462,7 +473,9 @@ async def main():
     
     # Start MJPEG streaming server
     mjpeg_server = MJPEGStreamServer(STREAM_PORT)
-    mjpeg_server.start()
+    if not mjpeg_server.start():
+        logger.error("Failed to start MJPEG streaming server")
+        return
     
     # Start tasks
     tasks = [
