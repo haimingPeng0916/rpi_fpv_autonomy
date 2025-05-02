@@ -11,6 +11,8 @@ import os
 import logging
 import signal
 import sys
+from http.server import SimpleHTTPRequestHandler, HTTPServer
+import threading
 
 # Configure logging
 logging.basicConfig(
@@ -28,6 +30,9 @@ WS_PORT = 8765
 
 # MJPEG streaming port
 STREAM_PORT = 8000
+
+# HTTP server port for the dashboard
+HTTP_PORT = 8080
 
 # Global variables
 connected_clients = set()
@@ -346,6 +351,33 @@ class MJPEGStreamServer:
             
         logger.info("MJPEG stream server shut down")
 
+# Custom HTTP request handler to serve dashboard files
+class DashboardHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+    
+    def log_message(self, format, *args):
+        # Override to use our logger
+        logger.info(format % args)
+    
+    def end_headers(self):
+        # Ensure proper content type for HTML files
+        if self.path.endswith('.html'):
+            self.send_header('Content-Type', 'text/html')
+        super().end_headers()
+
+def start_http_server(port=8080):
+    """Start HTTP server to serve the dashboard"""
+    server = HTTPServer(('0.0.0.0', port), DashboardHandler)
+    logger.info(f"HTTP server started on port {port}")
+    
+    # Run in a thread
+    thread = threading.Thread(target=server.serve_forever)
+    thread.daemon = True
+    thread.start()
+    
+    return server
+
 async def websocket_server(stop):
     async def handler(websocket, path):
         # Register client
@@ -477,6 +509,9 @@ async def main():
         logger.error("Failed to start MJPEG streaming server")
         return
     
+    # Start HTTP server for dashboard
+    http_server = start_http_server(HTTP_PORT)
+    
     # Start tasks
     tasks = [
         websocket_server(stop),
@@ -490,6 +525,11 @@ async def main():
     await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
+    # Print startup message
+    logger.info("Starting FPV Dashboard Server")
+    logger.info(f"- Video stream: http://localhost:{STREAM_PORT}")
+    logger.info(f"- Dashboard: http://localhost:{HTTP_PORT}/fpv/web/static/index.html")
+    
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
