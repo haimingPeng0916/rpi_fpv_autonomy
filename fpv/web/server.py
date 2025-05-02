@@ -775,8 +775,8 @@ async def main():
     http_server = start_http_server(HTTP_PORT)
     
     # Check if dashboard exists
-    if not os.path.exists("fpv/web/index.html"):
-        logger.warning("Dashboard HTML file not found at fpv/web/index.html")
+    if not os.path.exists("fpv/web/static/index.html"):
+        logger.warning("Dashboard HTML file not found at fpv/web/static/index.html")
     
     # Print access URLs
     try:
@@ -784,7 +784,7 @@ async def main():
     except:
         local_ip = "localhost"
         
-    logger.info(f"Access the dashboard at: http://{local_ip}:{HTTP_PORT}/fpv/web/index.html")
+    logger.info(f"Access the dashboard at: http://{local_ip}:{HTTP_PORT}/fpv/web/static/index.html")
     if camera_streaming_active:
         logger.info(f"Direct camera stream: http://{local_ip}:{STREAM_PORT}/")
     
