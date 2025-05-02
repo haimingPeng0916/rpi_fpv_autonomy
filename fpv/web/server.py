@@ -2,17 +2,15 @@ import asyncio
 import websockets
 import json
 import time
-import serial
-import struct
-import cv2
-from threading import Thread
+import threading
 import socket
 import os
 import logging
 import signal
 import sys
 from http.server import SimpleHTTPRequestHandler, HTTPServer
-import threading
+import math
+from threading import Thread, Event
 
 # Configure logging
 logging.basicConfig(
@@ -21,213 +19,46 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Flight controller serial connection
-FC_PORT = '/dev/ttyS0'  # UART port, adjust as needed
-FC_BAUD = 115200
+# Configuration
+STREAM_PORT = 8000  # MJPEG streaming port
+HTTP_PORT = 8080    # Web interface port
+WS_PORT = 8765      # WebSocket port for flight data
+stop_event = Event()
 
-# WebSocket server port
-WS_PORT = 8765
-
-# MJPEG streaming port
-STREAM_PORT = 8000
-
-# HTTP server port for the dashboard
-HTTP_PORT = 8080
-
-# Global variables
+# Connected WebSocket clients
 connected_clients = set()
-fc_serial = None
-stop_event = False
 
-# MSP command constants
-MSP_SET_RAW_RC = 200
-MSP_RC_TUNING = 111
-MSP_ATTITUDE = 108
-MSP_ALTITUDE = 109
-MSP_ANALOG = 110
-MSP_STATUS = 101
-
-class MSPProtocol:
-    def __init__(self, serial_port):
-        self.serial = serial_port
-        
-    def msp_send(self, command, data=None):
-        if data is None:
-            data = []
-        
-        total_size = len(data)
-        checksum = 0
-        
-        # MSP header: $M
-        packet = ['$'.encode('ascii'), 'M'.encode('ascii'), '<'.encode('ascii')]
-        
-        # Size
-        packet.append(struct.pack('B', total_size))
-        checksum ^= total_size
-        
-        # Command
-        packet.append(struct.pack('B', command))
-        checksum ^= command
-        
-        # Data
-        for i in range(total_size):
-            packet.append(struct.pack('B', data[i]))
-            checksum ^= data[i]
-        
-        # Checksum
-        packet.append(struct.pack('B', checksum))
-        
-        # Send the packet
-        for p in packet:
-            self.serial.write(p)
-            
-        return True
-    
-    def msp_parse_response(self):
-        header = self.serial.read(3)
-        if len(header) != 3:
-            return None
-        
-        if header[0] != ord('$') or header[1] != ord('M') or header[2] != ord('>'):
-            return None
-        
-        size = ord(self.serial.read(1))
-        cmd = ord(self.serial.read(1))
-        data = self.serial.read(size)
-        checksum = ord(self.serial.read(1))
-        
-        # Verify checksum
-        calculated_checksum = size ^ cmd
-        for b in data:
-            calculated_checksum ^= b
-            
-        if calculated_checksum != checksum:
-            return None
-            
-        return {'cmd': cmd, 'data': data}
-    
-    def set_raw_rc(self, channels):
-        """
-        Send raw RC values (typically between 1000-2000) to the flight controller
-        channels: List of channel values [ch1, ch2, ch3, ch4, ...]
-        """
-        data = []
-        for ch in channels:
-            data.append(ch & 0xFF)        # low byte
-            data.append((ch >> 8) & 0xFF) # high byte
-            
-        return self.msp_send(MSP_SET_RAW_RC, data)
-    
-    def arm(self):
-        """Arms the flight controller"""
-        # Typically, arming is done by setting throttle low and yaw right
-        # This implementation may vary depending on your FC
-        channels = [1500, 1500, 1000, 1900] + [1500] * 4  # Roll, Pitch, Throttle, Yaw + 4 aux channels
-        return self.set_raw_rc(channels)
-    
-    def disarm(self):
-        """Disarms the flight controller"""
-        # Typically, disarming is done by setting throttle low and yaw left
-        channels = [1500, 1500, 1000, 1100] + [1500] * 4
-        return self.set_raw_rc(channels)
-    
-    def send_command(self, command_str):
-        """
-        Parse and send various commands to the flight controller
-        Format examples:
-        - "arm" - arms the motors
-        - "disarm" - disarms the motors
-        - "set throttle 1500" - sets throttle to 1500
-        - "set roll 1200" - sets roll to 1200
-        """
-        parts = command_str.lower().split()
-        response = ""
-        
-        if not parts:
-            return "Empty command"
-        
-        if parts[0] == "arm":
-            if self.arm():
-                response = "Armed successfully"
-            else:
-                response = "Failed to arm"
-                
-        elif parts[0] == "disarm":
-            if self.disarm():
-                response = "Disarmed successfully"
-            else:
-                response = "Failed to disarm"
-                
-        elif parts[0] == "set" and len(parts) >= 3:
-            channel = parts[1]
-            try:
-                value = int(parts[2])
-                # Ensure value is within safe limits
-                value = max(1000, min(2000, value))
-                
-                # Default channels
-                channels = [1500, 1500, 1000, 1500] + [1500] * 4
-                
-                if channel == "roll":
-                    channels[0] = value
-                elif channel == "pitch":
-                    channels[1] = value
-                elif channel == "throttle":
-                    channels[2] = value
-                elif channel == "yaw":
-                    channels[3] = value
-                elif channel.startswith("aux") and len(channel) > 3:
-                    try:
-                        aux_num = int(channel[3:])
-                        if 1 <= aux_num <= 4:
-                            channels[3 + aux_num] = value
-                        else:
-                            return f"Invalid aux channel: {channel}"
-                    except ValueError:
-                        return f"Invalid aux channel: {channel}"
-                else:
-                    return f"Unknown channel: {channel}"
-                
-                if self.set_raw_rc(channels):
-                    response = f"Set {channel} to {value}"
-                else:
-                    response = f"Failed to set {channel}"
-            except ValueError:
-                response = f"Invalid value: {parts[2]}"
-        else:
-            response = f"Unknown command: {command_str}"
-            
-        return response
-
-class SensorData:
+class FlightData:
+    """Simulates or reads flight controller data"""
     def __init__(self):
         self.roll = 0
         self.pitch = 0
         self.yaw = 0
         self.altitude = 0
-        self.battery = 0
-        self.gps_fix = False
-        self.lat = 0
-        self.lon = 0
-        self.armed = False
-        self.flight_mode = "IDLE"
+        self.battery = 75
+        
+    def update(self):
+        """Update flight data (simulation for now)"""
+        # Simulate dynamic data
+        self.roll = 45 * math.sin(time.time() * 0.5)
+        self.pitch = 30 * math.sin(time.time() * 0.3)
+        self.yaw = (time.time() * 10) % 360
+        self.altitude = 10 + 2 * math.sin(time.time() / 5)
+        self.battery = max(0, self.battery - 0.01)
         
     def to_json(self):
+        """Convert to JSON format"""
         return {
             "type": "sensor_data",
-            "roll": self.roll,
-            "pitch": self.pitch,
-            "yaw": self.yaw,
-            "altitude": self.altitude,
-            "battery": self.battery,
-            "gps_fix": self.gps_fix,
-            "lat": self.lat,
-            "lon": self.lon,
-            "armed": self.armed,
-            "flight_mode": self.flight_mode
+            "roll": round(self.roll, 1),
+            "pitch": round(self.pitch, 1),
+            "yaw": round(self.yaw, 1),
+            "altitude": round(self.altitude, 1),
+            "battery": round(self.battery, 1)
         }
 
-class MJPEGStreamServer:
+class CameraStreamer:
+    """Handles camera capture and MJPEG streaming"""
     def __init__(self, port=8000):
         self.port = port
         self.server_socket = None
@@ -235,15 +66,41 @@ class MJPEGStreamServer:
         self.camera = None
         
     def start(self):
-        # Initialize OpenCV camera
-        self.camera = cv2.VideoCapture(0)  # Use 0 for the first camera
-        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        
-        if not self.camera.isOpened():
-            logger.error("Failed to open camera")
+        """Initialize camera and start streaming server"""
+        # Try to initialize camera
+        try:
+            # First try to use PiCamera if available
+            try:
+                from picamera2 import Picamera2
+                self.camera = Picamera2()
+                # Configure with a reasonable resolution
+                self.camera.configure(self.camera.create_preview_configuration(
+                    main={"size": (640, 480), "format": "RGB888"}
+                ))
+                self.camera.start()
+                logger.info("Using Raspberry Pi Camera module")
+            except (ImportError, Exception) as e:
+                logger.info(f"PiCamera not available: {e}, trying OpenCV")
+                # Fallback to OpenCV
+                import cv2
+                # Try different camera devices
+                for i in range(3):  # Try cameras 0, 1, 2
+                    try:
+                        self.camera = cv2.VideoCapture(i)
+                        if self.camera.isOpened():
+                            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                            logger.info(f"Using OpenCV with camera at index {i}")
+                            break
+                    except Exception as e:
+                        logger.warning(f"Failed to open camera at index {i}: {e}")
+                
+                if not self.camera or not getattr(self.camera, 'isOpened', lambda: False)():
+                    raise Exception("No camera available")
+        except Exception as e:
+            logger.error(f"Failed to initialize any camera: {e}")
             return False
-            
+                    
         logger.info("Camera initialized successfully")
         
         # Start the server in a separate thread
@@ -255,13 +112,14 @@ class MJPEGStreamServer:
         return True
         
     def _run_server(self):
+        """Run the streaming server"""
         try:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.server_socket.bind(('0.0.0.0', self.port))
             self.server_socket.listen(5)
             
-            while not stop_event:
+            while not stop_event.is_set():
                 try:
                     conn, addr = self.server_socket.accept()
                     logger.info(f"New stream connection from {addr}")
@@ -282,45 +140,64 @@ class MJPEGStreamServer:
             self._cleanup()
     
     def _handle_client(self, conn):
+        """Handle a single client connection"""
         try:
             # Send HTTP response header
             response = (
                 b'HTTP/1.0 200 OK\r\n'
-                b'Server: OpenCV MJPEG Server\r\n'
+                b'Server: Camera MJPEG Server\r\n'
                 b'Content-Type: multipart/x-mixed-replace; boundary=FRAME\r\n'
                 b'Cache-Control: no-cache\r\n'
                 b'Connection: close\r\n\r\n'
             )
             conn.sendall(response)
             
+            # Check what type of camera we're using
+            is_picamera = hasattr(self.camera, 'capture_array')
+            
             # Stream frames
-            while not stop_event and self.camera.isOpened():
-                # Capture a frame from the camera
-                ret, frame = self.camera.read()
-                if not ret:
-                    logger.warning("Failed to read frame from camera")
-                    break
-                
-                # Convert to JPEG
-                ret, jpeg_buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                if not ret:
-                    logger.warning("Failed to encode frame to JPEG")
-                    continue
-                
-                # Get the byte array
-                jpeg_bytes = jpeg_buffer.tobytes()
+            while not stop_event.is_set():
+                # Capture a frame
+                if is_picamera:
+                    frame = self.camera.capture_array()
+                    import cv2
+                    ret, jpeg_buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    if not ret:
+                        logger.warning("Failed to encode frame to JPEG")
+                        continue
+                    jpeg_bytes = jpeg_buffer.tobytes()
+                else:
+                    ret, frame = self.camera.read()
+                    if not ret:
+                        logger.warning("Failed to read frame from camera")
+                        time.sleep(0.1)
+                        continue
+                    
+                    # Convert to JPEG
+                    import cv2
+                    ret, jpeg_buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    if not ret:
+                        logger.warning("Failed to encode frame to JPEG")
+                        continue
+                    
+                    # Get the byte array
+                    jpeg_bytes = jpeg_buffer.tobytes()
                 
                 # Send the frame with MJPEG header
-                conn.sendall(
-                    b'--FRAME\r\n'
-                    b'Content-Type: image/jpeg\r\n'
-                    b'Content-Length: ' + str(len(jpeg_bytes)).encode() + b'\r\n\r\n'
-                )
-                conn.sendall(jpeg_bytes)
-                conn.sendall(b'\r\n')
+                try:
+                    conn.sendall(
+                        b'--FRAME\r\n'
+                        b'Content-Type: image/jpeg\r\n'
+                        b'Content-Length: ' + str(len(jpeg_bytes)).encode() + b'\r\n\r\n'
+                    )
+                    conn.sendall(jpeg_bytes)
+                    conn.sendall(b'\r\n')
+                except:
+                    # Client likely disconnected
+                    break
                 
                 # Limit frame rate
-                time.sleep(0.03)  # ~30fps
+                time.sleep(0.05)  # ~20fps
                 
         except Exception as e:
             logger.error(f"Client connection error: {e}")
@@ -331,6 +208,7 @@ class MJPEGStreamServer:
                 pass
     
     def _cleanup(self):
+        """Clean up resources"""
         # Close all connections
         for conn, _ in self.connections:
             try:
@@ -346,30 +224,174 @@ class MJPEGStreamServer:
                 pass
                 
         # Release camera
-        if self.camera and self.camera.isOpened():
-            self.camera.release()
+        if self.camera:
+            if hasattr(self.camera, 'stop'):
+                self.camera.stop()
+            elif hasattr(self.camera, 'release'):
+                self.camera.release()
             
         logger.info("MJPEG stream server shut down")
 
-# Custom HTTP request handler to serve dashboard files
+# Web server for hosting the dashboard
 class DashboardHandler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-    
+    """Serves the web dashboard files"""
     def log_message(self, format, *args):
-        # Override to use our logger
         logger.info(format % args)
     
     def end_headers(self):
         # Ensure proper content type for HTML files
         if self.path.endswith('.html'):
             self.send_header('Content-Type', 'text/html')
+        elif self.path.endswith('.js'):
+            self.send_header('Content-Type', 'application/javascript')
+        elif self.path.endswith('.css'):
+            self.send_header('Content-Type', 'text/css')
         super().end_headers()
 
 def start_http_server(port=8080):
     """Start HTTP server to serve the dashboard"""
     server = HTTPServer(('0.0.0.0', port), DashboardHandler)
     logger.info(f"HTTP server started on port {port}")
+    
+    # Create HTML file if it doesn't exist
+    os.makedirs("fpv/web", exist_ok=True)
+    
+    if not os.path.exists("fpv/web/index.html"):
+        with open("fpv/web/index.html", "w") as f:
+            f.write("""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FPV Dashboard</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #222;
+            color: #fff;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+        .panel {
+            background-color: #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+        }
+        h1, h2 {
+            color: #ddd;
+        }
+        .video-panel {
+            flex: 1 1 60%;
+            min-width: 300px;
+        }
+        .data-panel {
+            flex: 1 1 30%;
+            min-width: 250px;
+        }
+        .data-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+        .metric {
+            background-color: #444;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        .metric-label {
+            font-size: 0.9em;
+            color: #aaa;
+            margin-bottom: 5px;
+        }
+        .metric-value {
+            font-size: 1.8em;
+            font-weight: bold;
+        }
+        #videoFeed {
+            width: 100%;
+            border-radius: 5px;
+            background-color: #000;
+        }
+    </style>
+</head>
+<body>
+    <h1>FPV Dashboard</h1>
+    
+    <div class="container">
+        <div class="panel video-panel">
+            <h2>Camera Feed</h2>
+            <img id="videoFeed" src="http://window.location.hostname:8000/" alt="Camera Feed">
+        </div>
+        
+        <div class="panel data-panel">
+            <h2>Flight Data</h2>
+            <div class="data-grid">
+                <div class="metric">
+                    <div class="metric-label">Roll</div>
+                    <div class="metric-value" id="roll">0.0°</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Pitch</div>
+                    <div class="metric-value" id="pitch">0.0°</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Yaw</div>
+                    <div class="metric-value" id="yaw">0.0°</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Altitude</div>
+                    <div class="metric-value" id="altitude">0.0 m</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Battery</div>
+                    <div class="metric-value" id="battery">0.0%</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Fix the video feed URL to use the current hostname
+        document.getElementById('videoFeed').src = `http://${window.location.hostname}:8000/`;
+        
+        // WebSocket for flight data
+        const ws = new WebSocket(`ws://${window.location.hostname}:8765`);
+        
+        ws.onopen = function() {
+            console.log('Connected to the server');
+        };
+        
+        ws.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === 'sensor_data') {
+                // Update flight data
+                document.getElementById('roll').textContent = `${data.roll.toFixed(1)}°`;
+                document.getElementById('pitch').textContent = `${data.pitch.toFixed(1)}°`;
+                document.getElementById('yaw').textContent = `${data.yaw.toFixed(1)}°`;
+                document.getElementById('altitude').textContent = `${data.altitude.toFixed(1)} m`;
+                document.getElementById('battery').textContent = `${data.battery.toFixed(1)}%`;
+            }
+        };
+        
+        ws.onclose = function() {
+            console.log('Disconnected from the server');
+            // Try to reconnect after 5 seconds
+            setTimeout(function() {
+                location.reload();
+            }, 5000);
+        };
+    </script>
+</body>
+</html>""")
+        logger.info("Created default index.html file")
     
     # Run in a thread
     thread = threading.Thread(target=server.serve_forever)
@@ -378,159 +400,99 @@ def start_http_server(port=8080):
     
     return server
 
-async def websocket_server(stop):
-    async def handler(websocket, path):
-        # Register client
-        connected_clients.add(websocket)
-        logger.info(f"Client connected. Total clients: {len(connected_clients)}")
-        
-        try:
-            while not stop.is_set():
-                try:
-                    # Wait for messages from clients with a timeout
-                    message = await asyncio.wait_for(websocket.recv(), timeout=1.0)
-                    
-                    # Parse the command
-                    try:
-                        data = json.loads(message)
-                        
-                        if data.get('type') == 'command':
-                            command = data.get('command', '')
-                            logger.info(f"Received command: {command}")
-                            
-                            # Process the command and get response
-                            if fc_serial and msp:
-                                response = msp.send_command(command)
-                            else:
-                                response = "Flight controller not connected"
-                                
-                            # Send response back to client
-                            await websocket.send(json.dumps({
-                                "type": "command_response",
-                                "message": response
-                            }))
-                            
-                    except json.JSONDecodeError:
-                        logger.error(f"Invalid JSON: {message}")
-                    except Exception as e:
-                        logger.error(f"Error processing command: {e}")
-                        
-                except asyncio.TimeoutError:
-                    # This is fine - it's just our timeout to check stop flag
-                    pass
-                except websockets.exceptions.ConnectionClosed:
-                    logger.info("Client disconnected")
-                    break
-        finally:
-            # Unregister client
-            connected_clients.remove(websocket)
-            logger.info(f"Client disconnected. Total clients: {len(connected_clients)}")
+async def websocket_handler(websocket, path):
+    """Handle WebSocket connections for flight data"""
+    # Register client
+    connected_clients.add(websocket)
+    logger.info(f"Client connected. Total clients: {len(connected_clients)}")
     
-    # Start WebSocket server
-    async with websockets.serve(handler, "0.0.0.0", WS_PORT):
-        logger.info(f"WebSocket server started on port {WS_PORT}")
-        while not stop.is_set():
-            await asyncio.sleep(1)
-
-async def sensor_data_broadcast(stop):
-    sensor_data = SensorData()
-    
-    # Simulate some sensor data for testing if no flight controller is connected
-    simulate_data = fc_serial is None
-    
-    while not stop.is_set():
-        try:
-            # If flight controller is connected, read real sensor data
-            if fc_serial and msp and not simulate_data:
-                # Here you would add code to read real sensor data from the flight controller
-                # using the MSP protocol
+    try:
+        while not stop_event.is_set():
+            # Keep the connection alive, client will only receive data
+            try:
+                await asyncio.wait_for(websocket.recv(), timeout=1.0)
+            except asyncio.TimeoutError:
+                # This is expected - we use timeout to check stop_event periodically
                 pass
-            else:
-                # Simulate data for testing
-                import math
-                sensor_data.roll = 45 * math.sin(time.time() * 0.5)
-                sensor_data.pitch = 30 * math.sin(time.time() * 0.3)
-                sensor_data.yaw = (time.time() * 10) % 360
-                sensor_data.altitude = 10 + 2 * math.sin(time.time() / 5)
-                sensor_data.battery = 70 - (time.time() % 30)
-            
-            # Broadcast sensor data to all connected clients
-            if connected_clients:
-                message = json.dumps(sensor_data.to_json())
-                await asyncio.gather(
-                    *[client.send(message) for client in connected_clients],
-                    return_exceptions=True
-                )
-                
-            # Update at 10Hz
-            await asyncio.sleep(0.1)
-            
-        except Exception as e:
-            logger.error(f"Error in sensor data broadcast: {e}")
-            await asyncio.sleep(1)
+            except websockets.exceptions.ConnectionClosed:
+                break
+    finally:
+        # Unregister client
+        connected_clients.remove(websocket)
+        logger.info(f"Client disconnected. Total clients: {len(connected_clients)}")
 
-def cleanup(signal_received=None, frame=None):
-    global stop_event
+async def flight_data_broadcast():
+    """Broadcast flight data to all connected clients"""
+    flight_data = FlightData()
+    
+    while not stop_event.is_set():
+        # Update flight data
+        flight_data.update()
+        
+        # Broadcast to all connected clients
+        if connected_clients:
+            message = json.dumps(flight_data.to_json())
+            await asyncio.gather(
+                *[client.send(message) for client in connected_clients],
+                return_exceptions=True
+            )
+        
+        # Update at 10Hz
+        await asyncio.sleep(0.1)
+
+async def start_websocket_server():
+    """Start the WebSocket server"""
+    async with websockets.serve(websocket_handler, "0.0.0.0", WS_PORT):
+        logger.info(f"WebSocket server started on port {WS_PORT}")
+        
+        # Start flight data broadcast
+        broadcast_task = asyncio.create_task(flight_data_broadcast())
+        
+        # Run until stopped
+        while not stop_event.is_set():
+            await asyncio.sleep(1)
+            
+        # Cancel broadcast task
+        broadcast_task.cancel()
+
+def cleanup():
+    """Clean up resources when stopping"""
     logger.info("Shutting down...")
     
     # Set stop event
-    stop_event = True
+    stop_event.set()
     
-    # Stop the asyncio event loop
-    try:
-        asyncio.get_event_loop().stop()
-    except:
-        pass
+    # Give threads time to clean up
+    time.sleep(1)
     
-    # Close serial connection
-    if fc_serial:
-        fc_serial.close()
-        
     sys.exit(0)
 
-async def main():
-    global fc_serial, msp
-    stop = asyncio.Event()
-    
-    # Initialize serial connection to flight controller
-    try:
-        fc_serial = serial.Serial(FC_PORT, FC_BAUD, timeout=1)
-        msp = MSPProtocol(fc_serial)
-        logger.info(f"Connected to flight controller on {FC_PORT}")
-    except Exception as e:
-        logger.warning(f"Failed to connect to flight controller: {e}")
-        logger.warning("Running in simulation mode")
-        fc_serial = None
-        msp = None
-    
-    # Start MJPEG streaming server
-    mjpeg_server = MJPEGStreamServer(STREAM_PORT)
-    if not mjpeg_server.start():
-        logger.error("Failed to start MJPEG streaming server")
-        return
-    
-    # Start HTTP server for dashboard
-    http_server = start_http_server(HTTP_PORT)
-    
-    # Start tasks
-    tasks = [
-        websocket_server(stop),
-        sensor_data_broadcast(stop)
-    ]
-    
-    # Register signal handlers for graceful shutdown
-    signal.signal(signal.SIGINT, cleanup)
-    signal.signal(signal.SIGTERM, cleanup)
-    
-    await asyncio.gather(*tasks)
-
-if __name__ == "__main__":
+def main():
+    """Main function"""
     # Print startup message
     logger.info("Starting FPV Dashboard Server")
-    logger.info(f"- Video stream: http://localhost:{STREAM_PORT}")
-    logger.info(f"- Dashboard: http://localhost:{HTTP_PORT}/fpv/web/static/index.html")
     
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        cleanup()
+    # Start camera streaming
+    camera_streamer = CameraStreamer(STREAM_PORT)
+    camera_streaming_active = camera_streamer.start()
+    if not camera_streaming_active:
+        logger.warning("Camera streaming not available")
+    
+    # Start HTTP server
+    http_server = start_http_server(HTTP_PORT)
+    
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, lambda *args: cleanup())
+    signal.signal(signal.SIGTERM, lambda *args: cleanup())
+    
+    # Print access URLs
+    local_ip = socket.gethostbyname(socket.gethostname())
+    logger.info(f"Access the dashboard at: http://{local_ip}:{HTTP_PORT}/fpv/web/static/index.html")
+    if camera_streaming_active:
+        logger.info(f"Direct camera stream: http://{local_ip}:{STREAM_PORT}/")
+    
+    # Start WebSocket server in asyncio event loop
+    asyncio.run(start_websocket_server())
+
+if __name__ == "__main__":
+    main()
