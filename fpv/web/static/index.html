@@ -3,47 +3,283 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FPV Dashboard</title>
-    <link rel="stylesheet" href="css/style.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.4.1/socket.io.min.js"></script>
+    <title>Drone Control Panel</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+        .panel {
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .video-panel {
+            flex: 1 1 60%;
+            min-width: 640px;
+        }
+        .data-panel {
+            flex: 1 1 30%;
+            min-width: 300px;
+        }
+        .command-panel {
+            flex: 1 1 100%;
+        }
+        h2 {
+            margin-top: 0;
+            color: #333;
+        }
+        #videoFeed {
+            width: 100%;
+            border-radius: 4px;
+            background-color: #000;
+        }
+        .data-container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+        .data-item {
+            padding: 10px;
+            background-color: #f9f9f9;
+            border-radius: 4px;
+        }
+        .data-label {
+            font-weight: bold;
+            color: #555;
+            margin-bottom: 5px;
+        }
+        .data-value {
+            font-size: 1.2em;
+            color: #333;
+        }
+        .command-input {
+            width: 100%;
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 16px;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        #commandHistory {
+            margin-top: 15px;
+            max-height: 200px;
+            overflow-y: auto;
+            background-color: #f0f0f0;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .command-entry {
+            margin-bottom: 5px;
+            padding: 5px;
+            border-radius: 3px;
+        }
+        .sent {
+            background-color: #e6f7ff;
+            border-left: 3px solid #1890ff;
+        }
+        .response {
+            background-color: #f6ffed;
+            border-left: 3px solid #52c41a;
+        }
+    </style>
 </head>
 <body>
+    <h1>Drone Control Panel</h1>
+    
     <div class="container">
-        <header>
-            <h1>FPV Dashboard</h1>
-        </header>
+        <div class="panel video-panel">
+            <h2>Camera Feed</h2>
+            <img id="videoFeed" src="http://192.168.0.7:8000/stream.mjpg" alt="Live Video Feed">
+        </div>
         
-        <div class="data-grid">
-            <div class="card">
-                <h3>Roll</h3>
-                <div class="data-value" id="roll">0.0°</div>
-            </div>
-            <div class="card">
-                <h3>Pitch</h3>
-                <div class="data-value" id="pitch">0.0°</div>
-            </div>
-            <div class="card">
-                <h3>Yaw</h3>
-                <div class="data-value" id="yaw">0.0°</div>
-            </div>
-            <div class="card">
-                <h3>Altitude</h3>
-                <div class="data-value" id="altitude">0.0 m</div>
+        <div class="panel data-panel">
+            <h2>Flight Data</h2>
+            <div class="data-container">
+                <div class="data-item">
+                    <div class="data-label">Roll</div>
+                    <div class="data-value" id="roll">0°</div>
+                </div>
+                <div class="data-item">
+                    <div class="data-label">Pitch</div>
+                    <div class="data-value" id="pitch">0°</div>
+                </div>
+                <div class="data-item">
+                    <div class="data-label">Yaw</div>
+                    <div class="data-value" id="yaw">0°</div>
+                </div>
+                <div class="data-item">
+                    <div class="data-label">Altitude</div>
+                    <div class="data-value" id="altitude">0 m</div>
+                </div>
+                <div class="data-item">
+                    <div class="data-label">Battery</div>
+                    <div class="data-value" id="battery">0%</div>
+                </div>
+                <div class="data-item">
+                    <div class="data-label">GPS</div>
+                    <div class="data-value" id="gps">N/A</div>
+                </div>
+                <div class="data-item">
+                    <div class="data-label">Armed</div>
+                    <div class="data-value" id="armed">No</div>
+                </div>
+                <div class="data-item">
+                    <div class="data-label">Flight Mode</div>
+                    <div class="data-value" id="flightMode">IDLE</div>
+                </div>
             </div>
         </div>
         
-        <div class="chart-container">
-            <h3>Attitude Data</h3>
-            <canvas id="attitudeChart"></canvas>
-        </div>
-        
-        <div class="chart-container">
-            <h3>IMU Data</h3>
-            <canvas id="imuChart"></canvas>
+        <div class="panel command-panel">
+            <h2>Command Center</h2>
+            <div class="command-input">
+                <input type="text" id="commandInput" placeholder="Enter command (e.g., 'arm', 'disarm', 'set throttle 1500')">
+                <button id="sendCommand">Send</button>
+            </div>
+            <div id="commandHistory">
+                <div class="command-entry">Command history will appear here...</div>
+            </div>
         </div>
     </div>
-
-    <script src="js/dashboard.js"></script>
+    
+    <script>
+        // WebSocket for sensor data and command communication
+        let ws;
+        let reconnectInterval;
+        
+        function connect() {
+            // Replace with your Raspberry Pi's IP address
+            ws = new WebSocket('ws://192.168.0.7:8765');
+            
+            ws.onopen = function() {
+                console.log('Connected to the server');
+                clearInterval(reconnectInterval);
+                
+                // Add connected status to command history
+                addToCommandHistory('Connected to server', 'response');
+            };
+            
+            ws.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                
+                // Check if it's sensor data or a command response
+                if (data.type === 'sensor_data') {
+                    updateSensorData(data);
+                } else if (data.type === 'command_response') {
+                    // Add the response to the command history
+                    addToCommandHistory(`Response: ${data.message}`, 'response');
+                }
+            };
+            
+            ws.onclose = function() {
+                console.log('Disconnected from the server');
+                // Try to reconnect after 5 seconds
+                reconnectInterval = setInterval(function() {
+                    connect();
+                }, 5000);
+                
+                // Add disconnected status to command history
+                addToCommandHistory('Disconnected from server', 'response');
+            };
+            
+            ws.onerror = function(error) {
+                console.error('WebSocket error:', error);
+            };
+        }
+        
+        function updateSensorData(data) {
+            document.getElementById('roll').textContent = data.roll.toFixed(1) + '°';
+            document.getElementById('pitch').textContent = data.pitch.toFixed(1) + '°';
+            document.getElementById('yaw').textContent = data.yaw.toFixed(1) + '°';
+            document.getElementById('altitude').textContent = data.altitude.toFixed(1) + ' m';
+            document.getElementById('battery').textContent = data.battery.toFixed(1) + '%';
+            document.getElementById('gps').textContent = data.gps_fix ? `${data.lat.toFixed(6)}, ${data.lon.toFixed(6)}` : 'No Fix';
+            document.getElementById('armed').textContent = data.armed ? 'Yes' : 'No';
+            document.getElementById('flightMode').textContent = data.flight_mode;
+        }
+        
+        function sendCommand(command) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const commandObj = {
+                    type: 'command',
+                    command: command
+                };
+                ws.send(JSON.stringify(commandObj));
+                
+                // Add the command to the history
+                addToCommandHistory(`Sent: ${command}`, 'sent');
+                
+                // Clear the input field
+                document.getElementById('commandInput').value = '';
+            } else {
+                alert('Not connected to the server. Trying to reconnect...');
+                connect();
+            }
+        }
+        
+        function addToCommandHistory(message, type) {
+            const historyDiv = document.getElementById('commandHistory');
+            const entry = document.createElement('div');
+            entry.className = `command-entry ${type}`;
+            entry.textContent = message;
+            
+            // Add timestamp
+            const timestamp = new Date().toLocaleTimeString();
+            entry.textContent = `[${timestamp}] ${message}`;
+            
+            historyDiv.appendChild(entry);
+            
+            // Auto-scroll to the bottom
+            historyDiv.scrollTop = historyDiv.scrollHeight;
+        }
+        
+        // Connect when the page loads
+        connect();
+        
+        // Set up the send button click handler
+        document.getElementById('sendCommand').addEventListener('click', function() {
+            const command = document.getElementById('commandInput').value;
+            if (command.trim() !== '') {
+                sendCommand(command);
+            }
+        });
+        
+        // Allow pressing Enter to send command
+        document.getElementById('commandInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                const command = this.value;
+                if (command.trim() !== '') {
+                    sendCommand(command);
+                }
+            }
+        });
+    </script>
 </body>
 </html>
