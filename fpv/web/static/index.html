@@ -116,7 +116,7 @@
     <div class="container">
         <div class="panel video-panel">
             <h2>Camera Feed</h2>
-            <img id="videoFeed" src="http://192.168.0.7:8000/stream.mjpg" alt="Live Video Feed">
+            <img id="videoFeed" src="http://127.0.1.1:8000/stream.mjpg" alt="Live Video Feed">
         </div>
         
         <div class="panel data-panel">
@@ -176,7 +176,7 @@
         
         function connect() {
             // Replace with your Raspberry Pi's IP address
-            ws = new WebSocket('ws://192.168.0.7:8765');
+            ws = new WebSocket('ws://127.0.1.1:8000/');
             
             ws.onopen = function() {
                 console.log('Connected to the server');

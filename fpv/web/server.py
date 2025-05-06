@@ -27,8 +27,8 @@ FC_PORT = '/dev/ttyS0'  # UART0 (GPIO 14/15)
 FC_BAUD = 115200    # Baud rate for flight controller
 stop_event = Event()
 
-# Connected WebSocket clients
-connected_clients = set()
+# Get the absolute path to your project root
+project_root = os.path.abspath(os.path.dirname(__file__))
 
 class FlightController:
     """Interface to the flight controller using MSP protocol"""
@@ -398,7 +398,7 @@ class PiCameraStreamer:
             import numpy as np
             
             # Initialize the camera (cam_num=1 for second camera)
-            camera_num = 1  # Use CAM 1 as specified
+            camera_num = 0  # Use CAM 1 as specified
             self.camera = Picamera2(camera_num)
             
             # Configure camera
@@ -571,6 +571,12 @@ class PiCameraStreamer:
                 return None
 
 class DashboardHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        # Set the directory to the project root
+        self.directory = project_root
+        super().__init__(*args, **kwargs)
+    
+    
     """Serves the web dashboard files"""
     def log_message(self, format, *args):
         logger.info(format % args)
@@ -774,9 +780,16 @@ async def main():
     # Start HTTP server for dashboard
     http_server = start_http_server(HTTP_PORT)
     
+    '''
     # Check if dashboard exists
     if not os.path.exists("fpv/web/static/index.html"):
         logger.warning("Dashboard HTML file not found at fpv/web/static/index.html")
+    '''
+    
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    dashboard_path = os.path.join(script_dir, "static", "index.html")
+    if not os.path.exists(dashboard_path):
+        logger.warning(f"Dashboard HTML file not found at {dashboard_path}")
     
     # Print access URLs
     try:
@@ -784,7 +797,7 @@ async def main():
     except:
         local_ip = "localhost"
         
-    logger.info(f"Access the dashboard at: http://{local_ip}:{HTTP_PORT}/fpv/web/static/index.html")
+    logger.info(f"Access the dashboard at: http://{local_ip}:{HTTP_PORT}/static/index.html")
     if camera_streaming_active:
         logger.info(f"Direct camera stream: http://{local_ip}:{STREAM_PORT}/")
     
