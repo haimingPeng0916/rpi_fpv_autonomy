@@ -1,0 +1,144 @@
+<!-- templates/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FPV Control Station</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>FPV Control Station</h1>
+            <div class="controls">
+                <button class="button active" data-mode="basic">Basic View</button>
+                <button class="button" data-mode="edge">Edge Detection</button>
+                <button class="button" data-mode="contour">Contour View</button>
+                <button class="button" data-mode="grid">Grid Overlay</button>
+            </div>
+        </header>
+        
+        <div class="video-container">
+            <img class="video-feed" src="{{ url_for('video_feed') }}" alt="FPV Camera Feed">
+        </div>
+        
+        <div class="telemetry">
+            <div class="telemetry-item">
+                <div class="telemetry-label">ROLL</div>
+                <div class="telemetry-value" id="roll">0.0°</div>
+            </div>
+            <div class="telemetry-item">
+                <div class="telemetry-label">PITCH</div>
+                <div class="telemetry-value" id="pitch">0.0°</div>
+            </div>
+            <div class="telemetry-item">
+                <div class="telemetry-label">YAW</div>
+                <div class="telemetry-value" id="yaw">0.0°</div>
+            </div>
+            <div class="telemetry-item">
+                <div class="telemetry-label">ALTITUDE</div>
+                <div class="telemetry-value" id="altitude">0.0m</div>
+            </div>
+            <div class="telemetry-item">
+                <div class="telemetry-label">BATTERY</div>
+                <div class="telemetry-value" id="battery">0.0V</div>
+            </div>
+            <div class="telemetry-item">
+                <div class="telemetry-label">MODE</div>
+                <div class="telemetry-value" id="mode">ANGLE</div>
+            </div>
+            <div class="telemetry-item">
+                <div class="telemetry-label">STATUS</div>
+                <div class="telemetry-value" id="armed">DISARMED</div>
+            </div>
+            <div class="telemetry-item">
+                <div class="telemetry-label">GPS SAT</div>
+                <div class="telemetry-value" id="gps-satellites">0</div>
+            </div>
+        </div>
+        
+        <div class="advanced-telemetry">
+            <h2>Advanced Telemetry</h2>
+            <div class="telemetry-grid">
+                <div>
+                    <div class="telemetry-label">HOME DISTANCE</div>
+                    <div class="telemetry-value" id="home-distance">0.0m</div>
+                </div>
+                <div>
+                    <div class="telemetry-label">GROUND SPEED</div>
+                    <div class="telemetry-value" id="ground-speed">0.0m/s</div>
+                </div>
+                <div>
+                    <div class="telemetry-label">AIR SPEED</div>
+                    <div class="telemetry-value" id="air-speed">0.0m/s</div>
+                </div>
+                <div>
+                    <div class="telemetry-label">SIGNAL</div>
+                    <div class="telemetry-value" id="rssi">0%</div>
+                </div>
+            </div>
+        </div>
+        
+        <footer>
+            <p>FPV Control Station v1.0 - Raspberry Pi</p>
+        </footer>
+    </div>
+    
+    <script>
+        // Update flight data every 200ms
+        setInterval(function() {
+            fetch('/api/flight_data')
+                .then(response => response.json())
+                .then(data => {
+                    // Update attitude
+                    document.getElementById('roll').textContent = data.attitude.roll.toFixed(1) + '°';
+                    document.getElementById('pitch').textContent = data.attitude.pitch.toFixed(1) + '°';
+                    document.getElementById('yaw').textContent = data.attitude.yaw.toFixed(1) + '°';
+                    document.getElementById('altitude').textContent = data.altitude.toFixed(1) + 'm';
+                    
+                    // Update status
+                    document.getElementById('battery').textContent = data.battery.toFixed(1) + 'V';
+                    document.getElementById('mode').textContent = data.mode;
+                    
+                    // Update armed status with color
+                    const armedElem = document.getElementById('armed');
+                    if (data.armed) {
+                        armedElem.textContent = 'ARMED';
+                        armedElem.className = 'telemetry-value armed';
+                    } else {
+                        armedElem.textContent = 'DISARMED';
+                        armedElem.className = 'telemetry-value disarmed';
+                    }
+                    
+                    // Update GPS and advanced data
+                    document.getElementById('gps-satellites').textContent = data.gps.satellites;
+                    document.getElementById('home-distance').textContent = data.home_distance.toFixed(1) + 'm';
+                    document.getElementById('ground-speed').textContent = data.ground_speed.toFixed(1) + 'm/s';
+                    document.getElementById('air-speed').textContent = data.airspeed.toFixed(1) + 'm/s';
+                    document.getElementById('rssi').textContent = data.rssi + '%';
+                });
+        }, 200);
+        
+        // Visualization mode buttons
+        document.querySelectorAll('.button[data-mode]').forEach(button => {
+            button.addEventListener('click', function() {
+                const mode = this.getAttribute('data-mode');
+                
+                // Update active button
+                document.querySelectorAll('.button[data-mode]').forEach(btn => {
+                    btn.classList.remove('active');
+                });
+                this.classList.add('active');
+                
+                // Send mode change request
+                fetch(`/api/visualization_mode/${mode}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        console.log(`Visualization mode set to: ${data.mode}`);
+                    });
+            });
+        });
+    </script>
+</body>
+</html>
