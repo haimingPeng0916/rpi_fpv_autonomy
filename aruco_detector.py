@@ -1,159 +1,332 @@
-# aruco_detector.py
+# aruco_detector.py - Enhanced for 6x6 ArUco markers
 import cv2
-import cv2.aruco as aruco
 import numpy as np
 import time
 
 class ArucoDetector:
-    def __init__(self, dictionary_type=aruco.DICT_4X4_50):
-        """Initialize ArUco detector with specified dictionary."""
-        # Set up ArUco detection
-        self.aruco_dict = aruco.Dictionary_get(dictionary_type)
-        self.parameters = aruco.DetectorParameters_create()
-        
-        # Enhance parameters for better detection
-        self.parameters.adaptiveThreshConstant = 7
-        self.parameters.adaptiveThreshWinSizeMin = 3
-        self.parameters.adaptiveThreshWinSizeMax = 23
-        self.parameters.adaptiveThreshWinSizeStep = 10
-        self.parameters.minMarkerPerimeterRate = 0.03
-        self.parameters.maxMarkerPerimeterRate = 0.5
-        
-        # Stats for performance tracking
-        self.detection_count = 0
-        self.frame_count = 0
-        self.last_detection_time = 0
-        self.fps = 0
-        self.last_fps_update = time.time()
+    """Enhanced ArUco detector optimized for 6x6 markers in FPV applications."""
     
-    def detect_markers(self, frame):
-        """Detect ArUco markers in the given frame."""
-        # Update frame count
-        self.frame_count += 1
+    def __init__(self):
+        """Initialize the ArUco detector with multiple dictionaries."""
+        self.aruco_dicts = {}
+        self.aruco_params = None
+        self.last_detection_time = 0
+        self.detection_history = []
+        self.max_history = 5
         
-        # Update FPS calculation every second
-        current_time = time.time()
-        if current_time - self.last_fps_update >= 1.0:
-            self.fps = self.frame_count / (current_time - self.last_fps_update)
-            self.frame_count = 0
-            self.last_fps_update = current_time
+        # Initialize ArUco detection
+        self._init_aruco()
         
-        # Start with a copy of the frame for drawing
-        output_frame = frame.copy()
+        # Tracking for smooth detection
+        self.tracked_markers = {}
+        self.tracking_threshold = 50  # pixels
         
-        # Convert to grayscale
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    def _init_aruco(self):
+        """Initialize ArUco dictionaries with 6x6 priority."""
+        try:
+            import cv2.aruco as aruco
+            
+            # Priority order: 6x6 dictionaries first
+            dict_configs = [
+                (aruco.DICT_6X6_50, "6x6_50"),
+                (aruco.DICT_6X6_100, "6x6_100"),
+                (aruco.DICT_6X6_250, "6x6_250"),
+                (aruco.DICT_6X6_1000, "6x6_1000"),
+                (aruco.DICT_4X4_50, "4x4_50"),
+                (aruco.DICT_5X5_100, "5x5_100"),
+            ]
+            
+            for dict_type, name in dict_configs:
+                try:
+                    self.aruco_dicts[name] = aruco.Dictionary_get(dict_type)
+                    print(f"✅ Loaded ArUco dictionary: {name}")
+                except Exception as e:
+                    print(f"❌ Failed to load {name}: {e}")
+            
+            # Create optimized detector parameters
+            self.aruco_params = aruco.DetectorParameters_create()
+            self._optimize_parameters()
+            
+            print(f"ArUco detector initialized with {len(self.aruco_dicts)} dictionaries")
+            
+        except ImportError:
+            print("❌ OpenCV ArUco module not available")
+            raise
+    
+    def _optimize_parameters(self):
+        """Optimize detection parameters for 6x6 markers on RPi camera."""
+        # Adaptive thresholding
+        self.aruco_params.adaptiveThreshWinSizeMin = 3
+        self.aruco_params.adaptiveThreshWinSizeMax = 23
+        self.aruco_params.adaptiveThreshWinSizeStep = 10
+        self.aruco_params.adaptiveThreshConstant = 7
         
-        # Apply image enhancement for better detection
+        # Corner refinement for accuracy
+        self.aruco_params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+        self.aruco_params.cornerRefinementWinSize = 5
+        self.aruco_params.cornerRefinementMaxIterations = 30
+        self.aruco_params.cornerRefinementMinAccuracy = 0.1
+        
+        # Detection parameters
+        self.aruco_params.minMarkerPerimeterRate = 0.03
+        self.aruco_params.maxMarkerPerimeterRate = 4.0
+        self.aruco_params.polygonalApproxAccuracyRate = 0.03
+        self.aruco_params.minCornerDistanceRate = 0.05
+        self.aruco_params.minDistanceToBorder = 3
+        
+        # Bit extraction
+        self.aruco_params.markerBorderBits = 1
+        self.aruco_params.perspectiveRemovePixelPerCell = 8
+        self.aruco_params.perspectiveRemoveIgnoredMarginPerCell = 0.13
+        
+        # Error correction
+        self.aruco_params.maxErroneousBitsInBorderRate = 0.35
+        self.aruco_params.errorCorrectionRate = 0.6
+        
+        # Additional optimizations
+        self.aruco_params.minOtsuStdDev = 5.0
+        self.aruco_params.minMarkerDistanceRate = 0.05
+    
+    def preprocess_frame(self, frame):
+        """Preprocess frame for better detection."""
+        # Convert to grayscale if needed
+        if len(frame.shape) == 3:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = frame
+        
+        # Apply CLAHE for contrast enhancement
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
         
-        # Detect markers
-        corners, ids, rejected = aruco.detectMarkers(enhanced, self.aruco_dict, parameters=self.parameters)
+        # Denoise while preserving edges
+        denoised = cv2.bilateralFilter(enhanced, 9, 75, 75)
         
-        # Prepare detection data
-        detections = []
+        return denoised
+    
+    def detect_markers(self, frame):
+        """
+        Detect ArUco markers with enhanced processing.
         
-        # Process detected markers
-        if ids is not None and len(ids) > 0:
-            # Draw detected markers
-            aruco.drawDetectedMarkers(output_frame, corners, ids)
+        Returns:
+            detected (bool): Whether any markers were detected
+            output_frame (numpy.ndarray): Annotated frame
+            detections (list): List of detection dictionaries
+        """
+        import cv2.aruco as aruco
+        
+        output_frame = frame.copy()
+        all_detections = []
+        
+        # Preprocess frame
+        gray = self.preprocess_frame(frame)
+        
+        # Try detection with each dictionary (6x6 first)
+        for dict_name, aruco_dict in self.aruco_dicts.items():
+            # Skip non-6x6 if we already found 6x6 markers
+            if all_detections and any(d['dictionary'].startswith('6x6') for d in all_detections):
+                if not dict_name.startswith('6x6'):
+                    continue
             
-            # Process each detected marker
-            for i, corner in enumerate(corners):
-                # Extract points
-                pts = corner.reshape(4, 2)
+            try:
+                # Detect markers
+                corners, ids, rejected = aruco.detectMarkers(
+                    gray, aruco_dict, parameters=self.aruco_params
+                )
                 
-                # Calculate center
-                center_x = int(np.mean(pts[:, 0]))
-                center_y = int(np.mean(pts[:, 1]))
-                center = (center_x, center_y)
+                # If no detection with preprocessed, try original
+                if ids is None and dict_name.startswith('6x6'):
+                    gray_original = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    corners, ids, rejected = aruco.detectMarkers(
+                        gray_original, aruco_dict, parameters=self.aruco_params
+                    )
                 
-                # Calculate bounding box
-                x_min, y_min = np.min(pts, axis=0).astype(int)
-                x_max, y_max = np.max(pts, axis=0).astype(int)
-                width = x_max - x_min
-                height = y_max - y_min
+                if ids is not None and len(ids) > 0:
+                    # Process each detected marker
+                    for i, (corner, marker_id) in enumerate(zip(corners, ids.flatten())):
+                        detection = self._process_detection(
+                            corner, marker_id, dict_name, frame.shape
+                        )
+                        all_detections.append(detection)
+                    
+                    print(f"Found {len(ids)} markers with {dict_name}")
+                    
+                    # Draw on output frame
+                    self._draw_detections(output_frame, corners, ids, dict_name)
+                    
+                    # Stop if we found 6x6 markers
+                    if dict_name.startswith('6x6'):
+                        break
+                        
+            except Exception as e:
+                print(f"Error detecting with {dict_name}: {e}")
+                continue
+        
+        # Update tracking
+        self._update_tracking(all_detections)
+        
+        # Draw status overlay
+        self._draw_status_overlay(output_frame, all_detections)
+        
+        # Update detection history
+        self.detection_history.append(len(all_detections))
+        if len(self.detection_history) > self.max_history:
+            self.detection_history.pop(0)
+        
+        detected = len(all_detections) > 0
+        return detected, output_frame, all_detections
+    
+    def _process_detection(self, corner, marker_id, dict_name, frame_shape):
+        """Process a single marker detection."""
+        pts = corner.reshape(4, 2)
+        
+        # Calculate center
+        center_x = int(np.mean(pts[:, 0]))
+        center_y = int(np.mean(pts[:, 1]))
+        center = (center_x, center_y)
+        
+        # Calculate bounding box
+        x_min, y_min = np.min(pts, axis=0).astype(int)
+        x_max, y_max = np.max(pts, axis=0).astype(int)
+        bbox = (x_min, y_min, x_max - x_min, y_max - y_min)
+        
+        # Estimate distance (rough approximation)
+        marker_size_pixels = np.mean([np.linalg.norm(pts[i] - pts[(i+1)%4]) for i in range(4)])
+        distance_cm = int(5000 / max(marker_size_pixels, 1))  # Assumes 5cm marker
+        
+        # Calculate quality metric
+        corner_distances = [np.linalg.norm(pts[i] - pts[(i+1)%4]) for i in range(4)]
+        quality = 100 - min(np.std(corner_distances) * 10, 100)
+        
+        # Calculate pose angles (simplified)
+        # This is a rough estimation - use cv2.aruco.estimatePoseSingleMarkers for accurate pose
+        width = pts[1][0] - pts[0][0]
+        height = pts[2][1] - pts[1][1]
+        angle = np.degrees(np.arctan2(pts[1][1] - pts[0][1], pts[1][0] - pts[0][0]))
+        
+        return {
+            'id': int(marker_id),
+            'center': center,
+            'bbox': bbox,
+            'corners': pts.tolist(),
+            'distance': distance_cm,
+            'quality': int(quality),
+            'angle': angle,
+            'dictionary': dict_name,
+            'timestamp': time.time(),
+            'frame_position': (center_x / frame_shape[1], center_y / frame_shape[0])  # Normalized
+        }
+    
+    def _update_tracking(self, detections):
+        """Update marker tracking for smooth detection."""
+        current_ids = {d['id']: d for d in detections}
+        
+        # Update existing tracked markers
+        for marker_id in list(self.tracked_markers.keys()):
+            if marker_id in current_ids:
+                # Update position with smoothing
+                old_pos = self.tracked_markers[marker_id]['center']
+                new_pos = current_ids[marker_id]['center']
                 
-                # Draw center crosshair
-                cv2.line(output_frame, (center_x - 10, center_y), (center_x + 10, center_y), (0, 0, 255), 2)
-                cv2.line(output_frame, (center_x, center_y - 10), (center_x, center_y + 10), (0, 0, 255), 2)
+                # Simple exponential smoothing
+                alpha = 0.7
+                smooth_x = int(alpha * new_pos[0] + (1 - alpha) * old_pos[0])
+                smooth_y = int(alpha * new_pos[1] + (1 - alpha) * old_pos[1])
                 
-                # Draw marker ID and position info
-                label = f"ID: {ids[i][0]}"
-                cv2.putText(output_frame, label, (x_min, y_min - 10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                
-                position = f"Pos: ({center_x}, {center_y})"
-                cv2.putText(output_frame, position, (x_min, y_min - 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                
-                # Add fancy targeting display
-                # Corner indicators
-                cv2.line(output_frame, tuple(pts[0].astype(int)), (int(pts[0][0] + 20), int(pts[0][1])), (0, 255, 255), 2)
-                cv2.line(output_frame, tuple(pts[0].astype(int)), (int(pts[0][0]), int(pts[0][1] + 20)), (0, 255, 255), 2)
-                
-                cv2.line(output_frame, tuple(pts[2].astype(int)), (int(pts[2][0] - 20), int(pts[2][1])), (0, 255, 255), 2)
-                cv2.line(output_frame, tuple(pts[2].astype(int)), (int(pts[2][0]), int(pts[2][1] - 20)), (0, 255, 255), 2)
-                
-                # Approximate distance calculation
-                # This is a simple approximation - real distance would need camera calibration
-                marker_size_pixels = np.linalg.norm(pts[0] - pts[1])
-                distance_estimate = int(1000 / max(1, marker_size_pixels) * 100)  # Arbitrary scale
-                
-                # Add distance info
-                cv2.putText(output_frame, f"~{distance_estimate}cm", (x_min, y_min - 50), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                
-                # Save detection info
-                detections.append({
-                    'id': int(ids[i][0]),
-                    'center': center,
-                    'bbox': (int(x_min), int(y_min), int(width), int(height)),
-                    'corners': pts.tolist(),
-                    'distance': distance_estimate
-                })
+                self.tracked_markers[marker_id] = current_ids[marker_id]
+                self.tracked_markers[marker_id]['center'] = (smooth_x, smooth_y)
+                self.tracked_markers[marker_id]['tracked_frames'] = \
+                    self.tracked_markers[marker_id].get('tracked_frames', 0) + 1
+            else:
+                # Remove if not detected
+                del self.tracked_markers[marker_id]
+        
+        # Add new markers
+        for marker_id, detection in current_ids.items():
+            if marker_id not in self.tracked_markers:
+                self.tracked_markers[marker_id] = detection
+                self.tracked_markers[marker_id]['tracked_frames'] = 1
+    
+    def _draw_detections(self, frame, corners, ids, dict_name):
+        """Draw detected markers on frame."""
+        import cv2.aruco as aruco
+        
+        # Draw detected markers
+        aruco.drawDetectedMarkers(frame, corners, ids)
+        
+        # Add custom annotations
+        for i, (corner, marker_id) in enumerate(zip(corners, ids.flatten())):
+            pts = corner.reshape(4, 2)
+            center = pts.mean(axis=0).astype(int)
             
-            # Update detection stats
-            self.detection_count += 1
-            self.last_detection_time = time.time()
+            # Draw center crosshair
+            cv2.drawMarker(frame, tuple(center), (0, 0, 255), 
+                          cv2.MARKER_CROSS, 20, 2)
             
-            # Add detection status banner
-            cv2.rectangle(output_frame, (0, 0), (200, 40), (0, 255, 0), -1)
-            cv2.putText(output_frame, "DETECTED", (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+            # Add ID label with background
+            label = f"ID:{marker_id} ({dict_name})"
+            (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            x_min = int(pts[:, 0].min())
+            y_min = int(pts[:, 1].min()) - 10
+            
+            cv2.rectangle(frame, (x_min, y_min - h - 4), 
+                         (x_min + w + 4, y_min), (0, 0, 0), -1)
+            cv2.putText(frame, label, (x_min + 2, y_min - 2), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            
+            # Draw corner points
+            for j, pt in enumerate(pts):
+                cv2.circle(frame, tuple(pt.astype(int)), 4, (255, 0, 255), -1)
+                cv2.putText(frame, str(j), tuple(pt.astype(int) + 5), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+    
+    def _draw_status_overlay(self, frame, detections):
+        """Draw status information overlay."""
+        h, w = frame.shape[:2]
+        
+        # Status background
+        overlay_h = 40
+        cv2.rectangle(frame, (0, h - overlay_h), (w, h), (0, 0, 0), -1)
+        cv2.rectangle(frame, (0, h - overlay_h), (w, h), (0, 0, 0), 3)
+        
+        # Detection status
+        if detections:
+            status = f"ArUco: {len(detections)} detected"
+            color = (0, 255, 0)
+            
+            # Add marker IDs
+            ids_str = ", ".join([f"{d['id']}" for d in detections[:5]])
+            if len(detections) > 5:
+                ids_str += "..."
+            status += f" | IDs: {ids_str}"
         else:
-            # Add "no detection" banner
-            cv2.rectangle(output_frame, (0, 0), (250, 40), (0, 0, 255), -1)
-            cv2.putText(output_frame, "NO DETECTION", (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            status = "ArUco: No markers detected"
+            color = (0, 0, 255)
         
-        # Add performance stats
-        detection_rate = 100 * self.detection_count / max(1, self.frame_count)
-        cv2.putText(output_frame, f"FPS: {self.fps:.1f}", (10, output_frame.shape[0] - 50), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        # Detection stability indicator
+        if len(self.detection_history) > 2:
+            stability = np.std(self.detection_history)
+            if stability < 0.5:
+                status += " | Stable"
+            else:
+                status += " | Unstable"
         
-        cv2.putText(output_frame, f"Detection Rate: {detection_rate:.1f}%", (10, output_frame.shape[0] - 20), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(frame, status, (10, h - 15), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
         
-        # Add timestamp
-        timestamp = time.strftime("%H:%M:%S")
-        cv2.putText(output_frame, timestamp, (output_frame.shape[1] - 100, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        
-        return len(detections) > 0, output_frame, detections
-
-def generate_marker(marker_id, size=500, filename=None):
-    """Generate an ArUco marker image."""
-    aruco_dict = aruco.Dictionary_get(aruco.DICT_4X4_50)
-    marker_image = aruco.drawMarker(aruco_dict, marker_id, size)
+        # FPS indicator (if available)
+        current_time = time.time()
+        if hasattr(self, 'last_fps_time'):
+            fps = 1.0 / (current_time - self.last_fps_time)
+            cv2.putText(frame, f"FPS: {fps:.1f}", (w - 100, h - 15), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        self.last_fps_time = current_time
     
-    # Add white border for better detection
-    border_size = int(size * 0.1)  # 10% border
-    bordered_marker = np.ones((size + 2*border_size, size + 2*border_size), dtype=np.uint8) * 255
-    bordered_marker[border_size:border_size+size, border_size:border_size+size] = marker_image
+    def get_tracked_markers(self):
+        """Get currently tracked markers with smoothed positions."""
+        return self.tracked_markers.copy()
     
-    if filename:
-        cv2.imwrite(filename, bordered_marker)
-        
-    return bordered_marker
+    def reset_tracking(self):
+        """Reset marker tracking."""
+        self.tracked_markers.clear()
+        self.detection_history.clear()
